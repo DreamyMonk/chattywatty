@@ -62,3 +62,26 @@ export function isModelAvailableForProvider(modelId: string | undefined, provide
 export function defaultModelForProvider(provider: ProviderId): ModelId {
   return provider === "nvidia" ? "deepseek-v4-flash" : "deepseek-v4-flash";
 }
+
+export const DEFAULT_ENDPOINTS: Record<ProviderId, string> = {
+  official: "https://api.deepseek.com/chat/completions",
+  nvidia: "https://integrate.api.nvidia.com/v1/chat/completions",
+};
+
+/** Keeps only well-formed http(s) URLs; anything else falls back to the provider default. */
+export function sanitizeEndpoint(value: string | undefined) {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return "";
+  return /^https?:\/\/\S+$/i.test(trimmed) ? trimmed.replace(/\/+$/, "") : "";
+}
+
+export function sanitizeCustomModel(value: string | undefined) {
+  return (value ?? "").trim().slice(0, 200);
+}
+
+/** Accepts either a full chat-completions URL or an OpenAI-style base URL. */
+export function resolveEndpoint(provider: ProviderId, customEndpoint: string | undefined) {
+  const custom = sanitizeEndpoint(customEndpoint);
+  if (!custom) return DEFAULT_ENDPOINTS[provider];
+  return /\/chat\/completions$/i.test(custom) ? custom : `${custom}/chat/completions`;
+}

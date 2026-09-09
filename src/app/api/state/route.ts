@@ -1,5 +1,10 @@
 import { isAuthenticated } from "@/lib/auth";
-import { defaultModelForProvider, isModelAvailableForProvider } from "@/lib/models";
+import {
+  defaultModelForProvider,
+  isModelAvailableForProvider,
+  sanitizeCustomModel,
+  sanitizeEndpoint,
+} from "@/lib/models";
 import { readStore, toPublicSettings, writeStore, type Chat, type SettingsState } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -45,6 +50,11 @@ export async function PUT(request: Request) {
         ? incomingSettings.apiKey.trim()
         : current.settings.nvidiaApiKey
       : current.settings.nvidiaApiKey;
+  const pickText = (
+    incoming: string | undefined,
+    fallback: string,
+    sanitize: (value: string | undefined) => string,
+  ) => (typeof incoming === "string" ? sanitize(incoming) : fallback);
   const nextModel = isModelAvailableForProvider(incomingSettings.model, nextProvider)
     ? incomingSettings.model!
     : isModelAvailableForProvider(current.settings.model, nextProvider)
@@ -57,6 +67,22 @@ export async function PUT(request: Request) {
       provider: nextProvider,
       officialApiKey: nextOfficialApiKey,
       nvidiaApiKey: nextNvidiaApiKey,
+      officialBaseUrl: pickText(
+        incomingSettings.officialBaseUrl,
+        current.settings.officialBaseUrl,
+        sanitizeEndpoint,
+      ),
+      nvidiaBaseUrl: pickText(incomingSettings.nvidiaBaseUrl, current.settings.nvidiaBaseUrl, sanitizeEndpoint),
+      officialCustomModel: pickText(
+        incomingSettings.officialCustomModel,
+        current.settings.officialCustomModel,
+        sanitizeCustomModel,
+      ),
+      nvidiaCustomModel: pickText(
+        incomingSettings.nvidiaCustomModel,
+        current.settings.nvidiaCustomModel,
+        sanitizeCustomModel,
+      ),
       model: nextModel,
       instructions:
         typeof incomingSettings.instructions === "string"

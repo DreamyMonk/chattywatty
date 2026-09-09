@@ -1,6 +1,13 @@
 import { getApps, initializeApp } from "firebase/app";
 import { doc, getDoc, getFirestore, setDoc } from "firebase/firestore";
-import { defaultModelForProvider, isModelAvailableForProvider, type ModelId, type ProviderId } from "./models";
+import {
+  defaultModelForProvider,
+  isModelAvailableForProvider,
+  sanitizeCustomModel,
+  sanitizeEndpoint,
+  type ModelId,
+  type ProviderId,
+} from "./models";
 
 export type Role = "user" | "assistant";
 
@@ -23,6 +30,10 @@ export type SettingsState = {
   provider: ProviderId;
   officialApiKey: string;
   nvidiaApiKey: string;
+  officialBaseUrl: string;
+  nvidiaBaseUrl: string;
+  officialCustomModel: string;
+  nvidiaCustomModel: string;
   model: ModelId;
   instructions: string;
 };
@@ -52,6 +63,10 @@ const defaultSettings: SettingsState = {
   provider: "official",
   officialApiKey: "",
   nvidiaApiKey: "",
+  officialBaseUrl: "",
+  nvidiaBaseUrl: "",
+  officialCustomModel: "",
+  nvidiaCustomModel: "",
   model: "deepseek-v4-flash",
   instructions: "You are Chatmio, my private assistant. Be clear, useful, and direct.",
 };
@@ -117,6 +132,10 @@ function normalizeStore(value: Partial<StoreState> | null): StoreState {
       model,
       officialApiKey: incomingSettings?.officialApiKey ?? incomingSettings?.apiKey ?? "",
       nvidiaApiKey: incomingSettings?.nvidiaApiKey ?? "",
+      officialBaseUrl: sanitizeEndpoint(incomingSettings?.officialBaseUrl),
+      nvidiaBaseUrl: sanitizeEndpoint(incomingSettings?.nvidiaBaseUrl),
+      officialCustomModel: sanitizeCustomModel(incomingSettings?.officialCustomModel),
+      nvidiaCustomModel: sanitizeCustomModel(incomingSettings?.nvidiaCustomModel),
     },
     chats: value?.chats?.length ? value.chats.map(normalizeChat) : [createChat()],
   };
@@ -146,6 +165,10 @@ export function toPublicSettings(settings: SettingsState): PublicSettingsState {
     provider: settings.provider,
     model: settings.model,
     instructions: settings.instructions,
+    officialBaseUrl: settings.officialBaseUrl,
+    nvidiaBaseUrl: settings.nvidiaBaseUrl,
+    officialCustomModel: settings.officialCustomModel,
+    nvidiaCustomModel: settings.nvidiaCustomModel,
     apiKeySet: settings.provider === "nvidia" ? nvidiaApiKeySet : officialApiKeySet,
     officialApiKeySet,
     nvidiaApiKeySet,

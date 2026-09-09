@@ -1,5 +1,5 @@
 import { isAuthenticated } from "@/lib/auth";
-import { getModelDefinition } from "@/lib/models";
+import { getModelDefinition, resolveEndpoint, sanitizeCustomModel } from "@/lib/models";
 import { readStore, writeStore, type Chat, type Message, type StoreState } from "@/lib/store";
 
 type ChatMessage = {
@@ -14,16 +14,6 @@ type ChatRequest = {
   assistantMessage?: Message;
   messages?: ChatMessage[];
 };
-
-const PROVIDER_CONFIG = {
-  official: {
-    endpoint: "https://api.deepseek.com/chat/completions",
-    modelPrefix: "",
-  },
-  nvidia: {
-    endpoint: "https://integrate.api.nvidia.com/v1/chat/completions",
-  },
-} as const;
 
 const THINKING_START = "[[CHATMIO_THINKING_START]]";
 const THINKING_END = "[[CHATMIO_THINKING_END]]";
@@ -138,10 +128,17 @@ export async function POST(request: Request) {
     const store = await readStore();
 
     const provider = store.settings.provider === "nvidia" ? "nvidia" : "official";
-    const providerConfig = PROVIDER_CONFIG[provider];
+    const customEndpoint =
+      provider === "nvidia" ? store.settings.nvidiaBaseUrl : store.settings.officialBaseUrl;
+    const endpoint = resolveEndpoint(provider, customEndpoint);
+    const customModel = sanitizeCustomModel(
+      provider === "nvidia" ? store.settings.nvidiaCustomModel : store.settings.officialCustomModel,
+    );
     const modelDefinition = getModelDefinition(store.settings.model);
     const providerModelId =
-      provider === "nvidia" ? modelDefinition?.nvidiaModelId : store.settings.model;
+      customModel || (provider === "nvidia" ? modelDefinition?.nvidiaModelId : store.settings.model);
+    // A custom model id bypasses the catalog, so the Pro rate-limit fallback no longer applies.
+    const canFallbackToFlash = !customModel && store.settings.model === PRO_MODEL;
     const apiKey =
       provider === "nvidia" ? store.settings.nvidiaApiKey.trim() : store.settings.officialApiKey.trim();
     const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -183,7 +180,7 @@ export async function POST(request: Request) {
     ];
 
     if (provider === "nvidia") {
-      const isProModel = store.settings.model === PRO_MODEL;
+      const isProModel = !customModel && store.settings.model === PRO_MODEL;
       const timeoutMs = isProModel ? 180000 : 90000;
       const maxTokens = isProModel ? 4096 : 2048;
       const encoder = new TextEncoder();
@@ -192,13 +189,13 @@ export async function POST(request: Request) {
         async start(streamController) {
           const requestController = new AbortController();
           const timeout = setTimeout(() => requestController.abort(), timeoutMs);
-          let assistantContent = `${THINKING_START}Contacting NVIDIA NIM.\n\nModel: ${providerModelId}\n\nNVIDIA returns this model as one completed response, so Chatmio is waiting for the final answer and will type it out when it arrives.`;
+          let assistantContent = `${THINKING_START}Contacting ${customEndpoint ? "your custom NVIDIA-style endpoint" : "NVIDIA NIM"}.\n\nEndpoint: ${endpoint}\n\nModel: ${providerModelId}\n\nThis provider returns the model as one completed response, so Chatmio is waiting for the final answer and will type it out when it arrives.`;
 
           streamController.enqueue(encoder.encode(assistantContent));
 
           try {
             const requestNvidia = (model: string, tokens: number) =>
-              fetch(providerConfig.endpoint, {
+              fetch(endpoint, {
                 method: "POST",
                 signal: requestController.signal,
                 headers: {
@@ -221,7 +218,7 @@ export async function POST(request: Request) {
             let fallbackNotice = "";
             let nvidiaResponse = await requestNvidia(providerModelId, maxTokens);
 
-            if (nvidiaResponse.status === 429 && store.settings.model === PRO_MODEL) {
+            if (nvidiaResponse.status === 429 && canFallbackToFlash) {
               const note =
                 "\n\nDeepSeek V4 Pro is rate limited on NVIDIA NIM. I am switching this reply to V4 Flash automatically.";
               assistantContent += note;
@@ -233,7 +230,7 @@ export async function POST(request: Request) {
 
             if (!nvidiaResponse.ok) {
               const message =
-                nvidiaResponse.status === 429 && store.settings.model === PRO_MODEL
+                nvidiaResponse.status === 429 && canFallbackToFlash
                   ? proRateLimitMessage("NVIDIA NIM", nvidiaResponse)
                   : `Error: ${(await nvidiaResponse.text()) || "NVIDIA NIM did not return a usable response."}`;
               assistantContent += `${THINKING_END}${message}`;
@@ -282,7 +279,7 @@ export async function POST(request: Request) {
     }
 
     const requestOfficial = (model: string) =>
-      fetch(providerConfig.endpoint, {
+      fetch(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -299,14 +296,14 @@ export async function POST(request: Request) {
     let fallbackNotice = "";
     let deepseekResponse = await requestOfficial(providerModelId);
 
-    if (deepseekResponse.status === 429 && store.settings.model === PRO_MODEL) {
+    if (deepseekResponse.status === 429 && canFallbackToFlash) {
       fallbackNotice = "DeepSeek V4 Pro is rate limited right now, so I used V4 Flash for this reply.\n\n";
       deepseekResponse = await requestOfficial(FLASH_MODEL);
     }
 
     if (!deepseekResponse.ok || !deepseekResponse.body) {
       const errorText =
-        deepseekResponse.status === 429 && store.settings.model === PRO_MODEL
+        deepseekResponse.status === 429 && canFallbackToFlash
           ? proRateLimitMessage("DeepSeek official", deepseekResponse)
           : await deepseekResponse.text();
       return Response.json(

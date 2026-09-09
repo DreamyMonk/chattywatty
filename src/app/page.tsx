@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { MODEL_DEFINITIONS, type ModelId, type ProviderId } from "@/lib/models";
+import { DEFAULT_ENDPOINTS, MODEL_DEFINITIONS, type ModelId, type ProviderId } from "@/lib/models";
 
 type Role = "user" | "assistant";
 
@@ -45,6 +45,10 @@ type SettingsState = {
   provider: ProviderId;
   model: ModelId;
   instructions: string;
+  officialBaseUrl: string;
+  nvidiaBaseUrl: string;
+  officialCustomModel: string;
+  nvidiaCustomModel: string;
 };
 
 const defaultSettings: SettingsState = {
@@ -55,6 +59,10 @@ const defaultSettings: SettingsState = {
   provider: "official",
   model: "deepseek-v4-flash",
   instructions: "You are Chatmio, my private assistant. Be clear, useful, and direct.",
+  officialBaseUrl: "",
+  nvidiaBaseUrl: "",
+  officialCustomModel: "",
+  nvidiaCustomModel: "",
 };
 
 const THINKING_START = "[[CHATMIO_THINKING_START]]";
@@ -281,6 +289,10 @@ export default function Home() {
         provider: data.settings?.provider ?? defaultSettings.provider,
         model: data.settings?.model ?? defaultSettings.model,
         instructions: data.settings?.instructions ?? defaultSettings.instructions,
+        officialBaseUrl: data.settings?.officialBaseUrl ?? "",
+        nvidiaBaseUrl: data.settings?.nvidiaBaseUrl ?? "",
+        officialCustomModel: data.settings?.officialCustomModel ?? "",
+        nvidiaCustomModel: data.settings?.nvidiaCustomModel ?? "",
       });
       setAuthenticated(true);
       setHydrated(true);
@@ -309,6 +321,10 @@ export default function Home() {
               provider: nextSettings.provider,
               model: nextSettings.model,
               instructions: nextSettings.instructions,
+              officialBaseUrl: nextSettings.officialBaseUrl,
+              nvidiaBaseUrl: nextSettings.nvidiaBaseUrl,
+              officialCustomModel: nextSettings.officialCustomModel,
+              nvidiaCustomModel: nextSettings.nvidiaCustomModel,
             },
           }),
         });
@@ -326,6 +342,10 @@ export default function Home() {
           provider: data.settings.provider,
           model: data.settings.model,
           instructions: data.settings.instructions,
+          officialBaseUrl: data.settings.officialBaseUrl,
+          nvidiaBaseUrl: data.settings.nvidiaBaseUrl,
+          officialCustomModel: data.settings.officialCustomModel,
+          nvidiaCustomModel: data.settings.nvidiaCustomModel,
         }));
       } finally {
         pendingSyncRef.current = false;
@@ -371,6 +391,12 @@ export default function Home() {
     () => chats.find((chat) => chat.id === activeChatId) ?? chats[0],
     [activeChatId, chats],
   );
+
+  const isNvidia = settings.provider === "nvidia";
+  const baseUrlKey = isNvidia ? "nvidiaBaseUrl" : "officialBaseUrl";
+  const customModelKey = isNvidia ? "nvidiaCustomModel" : "officialCustomModel";
+  const activeBaseUrl = settings[baseUrlKey];
+  const activeCustomModel = settings[customModelKey];
 
   function updateActiveChat(updater: (chat: Chat) => Chat) {
     markLocalChange();
@@ -726,8 +752,11 @@ export default function Home() {
           <div className="min-w-0 flex-1">
             <p className="truncate text-base font-semibold">{chatDisplayTitle(activeChat)}</p>
             <p className="truncate text-xs text-zinc-400">
-              {settings.provider === "nvidia" ? "NVIDIA NIM" : "Official"} ·{" "}
-              {MODEL_DEFINITIONS.find((model) => model.id === settings.model)?.label ?? settings.model}
+              {isNvidia ? "NVIDIA NIM" : "Official"}
+              {activeBaseUrl ? " (custom endpoint)" : ""} ·{" "}
+              {activeCustomModel ||
+                MODEL_DEFINITIONS.find((model) => model.id === settings.model)?.label ||
+                settings.model}
             </p>
           </div>
           <IconButton label="Settings" onClick={() => setSettingsOpen(true)}>
@@ -814,7 +843,7 @@ export default function Home() {
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-semibold">Settings</h2>
-                <p className="text-sm text-zinc-400">DeepSeek key, model, and instructions</p>
+                <p className="text-sm text-zinc-400">Key, endpoint, model, and instructions</p>
               </div>
               <IconButton label="Close settings" onClick={() => setSettingsOpen(false)}>
                 <X size={18} />
@@ -858,7 +887,11 @@ export default function Home() {
             </div>
 
             <label className="mb-2 block text-sm text-zinc-300" htmlFor="apiKey">
-              {settings.provider === "nvidia" ? "NVIDIA NIM API key" : "DeepSeek official API key"}
+              {activeBaseUrl
+                ? `API key / token (${isNvidia ? "NVIDIA" : "DeepSeek"} custom endpoint)`
+                : isNvidia
+                  ? "NVIDIA NIM API key"
+                  : "DeepSeek official API key"}
             </label>
             <input
               id="apiKey"
@@ -876,9 +909,59 @@ export default function Home() {
             />
             {settings.apiKeySet ? (
               <p className="-mt-2 mb-4 text-xs text-emerald-200">
-                {settings.provider === "nvidia" ? "NVIDIA NIM" : "DeepSeek official"} key is saved in Firebase.
+                {activeBaseUrl
+                  ? `${isNvidia ? "NVIDIA" : "DeepSeek"} custom endpoint`
+                  : isNvidia
+                    ? "NVIDIA NIM"
+                    : "DeepSeek official"}{" "}
+                key is saved in Firebase.
               </p>
             ) : null}
+
+            <label className="mb-2 block text-sm text-zinc-300" htmlFor="baseUrl">
+              Custom endpoint (optional)
+            </label>
+            <input
+              id="baseUrl"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              value={activeBaseUrl}
+              onChange={(event) =>
+                updateSettings((current) => ({ ...current, [baseUrlKey]: event.target.value }))
+              }
+              placeholder={isNvidia ? DEFAULT_ENDPOINTS.nvidia : DEFAULT_ENDPOINTS.official}
+              className="mb-2 h-11 w-full rounded-xl border border-white/10 bg-black/25 px-3 text-sm outline-none ring-emerald-300/30 transition focus:ring-4"
+            />
+            <p className="mb-4 text-xs text-zinc-400">
+              Any OpenAI-compatible URL for the {isNvidia ? "NVIDIA" : "DeepSeek"} side. Paste a base URL like
+              {" "}
+              <code className="text-zinc-300">https://host/v1</code> or the full
+              {" "}
+              <code className="text-zinc-300">/chat/completions</code> path. Leave empty to use the default. The
+              key field above is the token sent as <code className="text-zinc-300">Authorization: Bearer</code> to
+              whichever endpoint is set here.
+            </p>
+
+            <label className="mb-2 block text-sm text-zinc-300" htmlFor="customModel">
+              Custom model ID (optional)
+            </label>
+            <input
+              id="customModel"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={activeCustomModel}
+              onChange={(event) =>
+                updateSettings((current) => ({ ...current, [customModelKey]: event.target.value }))
+              }
+              placeholder={isNvidia ? "deepseek-ai/deepseek-v4-flash" : "deepseek-chat"}
+              className="mb-2 h-11 w-full rounded-xl border border-white/10 bg-black/25 px-3 text-sm outline-none ring-emerald-300/30 transition focus:ring-4"
+            />
+            <p className="mb-4 text-xs text-zinc-400">
+              Sent instead of the model picked below, for endpoints that name models differently.
+            </p>
 
             <label className="mb-2 block text-sm text-zinc-300">Model</label>
             <div className="mb-4 grid grid-cols-2 gap-2">
@@ -899,7 +982,11 @@ export default function Home() {
                 </button>
               ))}
             </div>
-            {settings.provider === "nvidia" ? (
+            {activeCustomModel ? (
+              <p className="-mt-2 mb-4 text-xs text-amber-200">
+                Overridden by the custom model ID above ({activeCustomModel}).
+              </p>
+            ) : isNvidia ? (
               <p className="-mt-2 mb-4 text-xs text-zinc-400">
                 * Experimental models may fail if NVIDIA NIM has not enabled them for your account.
               </p>
