@@ -5,7 +5,23 @@ export type ModelId =
   | "glm-5.2"
   | "minimax-m3";
 
-export type ProviderId = "official" | "nvidia";
+export type ProviderId = "official" | "nvidia" | "anthropic";
+
+export const PROVIDER_IDS: ProviderId[] = ["official", "nvidia", "anthropic"];
+
+export const PROVIDER_LABELS: Record<ProviderId, string> = {
+  official: "DeepSeek",
+  nvidia: "NVIDIA NIM",
+  anthropic: "Claude",
+};
+
+/** Claude has no fixed catalog here: the user types the model name. */
+export const DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
+export const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
+
+export function isProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && (PROVIDER_IDS as string[]).includes(value);
+}
 
 export type ModelDefinition = {
   id: ModelId;
@@ -56,6 +72,8 @@ export function getModelDefinition(modelId: string | undefined) {
 }
 
 export function isModelAvailableForProvider(modelId: string | undefined, provider: ProviderId) {
+  // Claude uses its own free-text model field, so keep the DeepSeek/NVIDIA pick intact meanwhile.
+  if (provider === "anthropic") return MODEL_IDS.has(modelId as ModelId);
   return Boolean(getModelDefinition(modelId)?.providers.includes(provider));
 }
 
@@ -66,6 +84,7 @@ export function defaultModelForProvider(provider: ProviderId): ModelId {
 export const DEFAULT_ENDPOINTS: Record<ProviderId, string> = {
   official: "https://api.deepseek.com/chat/completions",
   nvidia: "https://integrate.api.nvidia.com/v1/chat/completions",
+  anthropic: DEFAULT_ANTHROPIC_BASE_URL,
 };
 
 /** Keeps only well-formed http(s) URLs; anything else falls back to the provider default. */
@@ -77,6 +96,16 @@ export function sanitizeEndpoint(value: string | undefined) {
 
 export function sanitizeCustomModel(value: string | undefined) {
   return (value ?? "").trim().slice(0, 200);
+}
+
+/**
+ * The Anthropic SDK appends `/v1/messages` itself, so strip it if the user pasted a full path.
+ * Returns undefined to let the SDK use its default host.
+ */
+export function resolveAnthropicBaseUrl(customEndpoint: string | undefined) {
+  const custom = sanitizeEndpoint(customEndpoint);
+  if (!custom) return undefined;
+  return custom.replace(/\/v1(\/messages)?$/i, "") || undefined;
 }
 
 /** Accepts either a full chat-completions URL or an OpenAI-style base URL. */

@@ -1,6 +1,14 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { isAuthenticated } from "@/lib/auth";
-import { getModelDefinition, resolveEndpoint, sanitizeCustomModel } from "@/lib/models";
-import { readStore, writeStore, type Chat, type Message, type StoreState } from "@/lib/store";
+import {
+  DEFAULT_ANTHROPIC_MODEL,
+  PROVIDER_LABELS,
+  getModelDefinition,
+  resolveAnthropicBaseUrl,
+  resolveEndpoint,
+  sanitizeCustomModel,
+} from "@/lib/models";
+import { apiKeyForProvider, readStore, writeStore, type Chat, type Message, type StoreState } from "@/lib/store";
 
 type ChatMessage = {
   role: "system" | "user" | "assistant";
@@ -112,6 +120,28 @@ function retryAfterSeconds(response: Response) {
   return undefined;
 }
 
+/** Saved replies embed reasoning between markers; never send that back to a model as history. */
+function stripThinking(content: string) {
+  const start = content.indexOf(THINKING_START);
+  if (start === -1) return content;
+  const end = content.indexOf(THINKING_END, start);
+  return `${content.slice(0, start)}${end === -1 ? "" : content.slice(end + THINKING_END.length)}`.trim();
+}
+
+function claudeErrorMessage(error: unknown, model: string) {
+  if (error instanceof Anthropic.AuthenticationError) return "Claude rejected the API key. Check it in Settings.";
+  if (error instanceof Anthropic.PermissionDeniedError) return `This API key does not have access to "${model}".`;
+  if (error instanceof Anthropic.NotFoundError) {
+    return `Model "${model}" was not found. Check the Claude model name in Settings.`;
+  }
+  if (error instanceof Anthropic.RateLimitError) return "Claude is rate limited right now. Wait a moment and try again.";
+  if (error instanceof Anthropic.APIConnectionError) {
+    return "Could not reach the Claude API. Check your network or the custom endpoint URL.";
+  }
+  if (error instanceof Anthropic.APIError) return `Claude API error ${error.status ?? ""}: ${error.message}`;
+  return "The Claude request failed before returning a response.";
+}
+
 function proRateLimitMessage(providerLabel: string, response: Response) {
   const retryAfter = retryAfterSeconds(response);
   const waitText = retryAfter ? ` Wait about ${retryAfter} seconds, then try Pro again.` : "";
@@ -127,20 +157,31 @@ export async function POST(request: Request) {
     const body = (await request.json()) as ChatRequest;
     const store = await readStore();
 
-    const provider = store.settings.provider === "nvidia" ? "nvidia" : "official";
-    const customEndpoint =
-      provider === "nvidia" ? store.settings.nvidiaBaseUrl : store.settings.officialBaseUrl;
+    const provider = store.settings.provider;
+    const customEndpoint = {
+      official: store.settings.officialBaseUrl,
+      nvidia: store.settings.nvidiaBaseUrl,
+      anthropic: store.settings.anthropicBaseUrl,
+    }[provider];
     const endpoint = resolveEndpoint(provider, customEndpoint);
     const customModel = sanitizeCustomModel(
-      provider === "nvidia" ? store.settings.nvidiaCustomModel : store.settings.officialCustomModel,
+      {
+        official: store.settings.officialCustomModel,
+        nvidia: store.settings.nvidiaCustomModel,
+        anthropic: store.settings.anthropicCustomModel,
+      }[provider],
     );
     const modelDefinition = getModelDefinition(store.settings.model);
     const providerModelId =
-      customModel || (provider === "nvidia" ? modelDefinition?.nvidiaModelId : store.settings.model);
+      customModel ||
+      (provider === "anthropic"
+        ? DEFAULT_ANTHROPIC_MODEL
+        : provider === "nvidia"
+          ? modelDefinition?.nvidiaModelId
+          : store.settings.model);
     // A custom model id bypasses the catalog, so the Pro rate-limit fallback no longer applies.
     const canFallbackToFlash = !customModel && store.settings.model === PRO_MODEL;
-    const apiKey =
-      provider === "nvidia" ? store.settings.nvidiaApiKey.trim() : store.settings.officialApiKey.trim();
+    const apiKey = apiKeyForProvider(store.settings).trim();
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const chatId = body.chatId?.trim();
     const userMessage = body.userMessage?.role === "user" ? body.userMessage : undefined;
@@ -148,14 +189,14 @@ export async function POST(request: Request) {
 
     if (!apiKey) {
       return Response.json(
-        { error: `Add your ${provider === "nvidia" ? "NVIDIA NIM" : "DeepSeek official"} API key in Settings first.` },
+        { error: `Add your ${PROVIDER_LABELS[provider]} API key in Settings first.` },
         { status: 400 },
       );
     }
 
     if (!providerModelId) {
       return Response.json(
-        { error: `Model ${store.settings.model} is not available for ${provider === "nvidia" ? "NVIDIA NIM" : "Official"}.` },
+        { error: `Model ${store.settings.model} is not available for ${PROVIDER_LABELS[provider]}.` },
         { status: 400 },
       );
     }
@@ -173,11 +214,113 @@ export async function POST(request: Request) {
       },
       ...messages
         .filter((message) => message.role === "user" || message.role === "assistant")
-        .map((message) => ({
-          role: message.role,
-          content: String(message.content ?? ""),
-        })),
+        .map((message) => {
+          const content = String(message.content ?? "");
+          return { role: message.role, content: message.role === "assistant" ? stripThinking(content) : content };
+        })
+        .filter((message) => message.content.trim()),
     ];
+
+    if (provider === "anthropic") {
+      const encoder = new TextEncoder();
+      const client = new Anthropic({ apiKey, baseURL: resolveAnthropicBaseUrl(customEndpoint), maxRetries: 1 });
+      const claudeMessages: Anthropic.MessageParam[] = preparedMessages.flatMap(({ role, content }) =>
+        role === "system" ? [] : [{ role, content }],
+      );
+      // Older Claude models reject adaptive thinking or a 64K output cap, so a 400 before any
+      // output retries once as a plain request.
+      const attempts: Array<Pick<Anthropic.MessageStreamParams, "max_tokens" | "thinking">> = [
+        { max_tokens: 64000, thinking: { type: "adaptive", display: "summarized" } },
+        { max_tokens: 8192 },
+      ];
+      let lastWrite = 0;
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          let assistantContent = "";
+          let isReasoning = false;
+
+          const emit = async (token: string) => {
+            assistantContent += token;
+            try {
+              controller.enqueue(encoder.encode(token));
+            } catch {
+              // The browser went away; keep persisting so the reply is not lost.
+            }
+            const now = Date.now();
+            if (now - lastWrite < 900) return;
+            lastWrite = now;
+            await persistAssistantMessage(chatId, body.title, userMessage, assistantMessage, assistantContent);
+          };
+
+          for (let attempt = 0; attempt < attempts.length; attempt++) {
+            try {
+              const claudeStream = client.messages.stream(
+                {
+                  model: providerModelId,
+                  system: preparedMessages[0].content,
+                  messages: claudeMessages,
+                  ...attempts[attempt],
+                },
+                { signal: request.signal },
+              );
+
+              for await (const event of claudeStream) {
+                if (event.type !== "content_block_delta") continue;
+
+                if (event.delta.type === "thinking_delta" && event.delta.thinking) {
+                  await emit(`${isReasoning ? "" : THINKING_START}${event.delta.thinking}`);
+                  isReasoning = true;
+                } else if (event.delta.type === "text_delta" && event.delta.text) {
+                  await emit(`${isReasoning ? THINKING_END : ""}${event.delta.text}`);
+                  isReasoning = false;
+                }
+              }
+
+              const finalMessage = await claudeStream.finalMessage();
+              if (isReasoning) {
+                await emit(THINKING_END);
+                isReasoning = false;
+              }
+              if (finalMessage.stop_reason === "refusal") {
+                await emit("\n\n_Claude declined to answer this request._");
+              } else if (finalMessage.stop_reason === "max_tokens") {
+                await emit("\n\n_Response cut off at the max token limit._");
+              }
+              break;
+            } catch (error) {
+              if (error instanceof Anthropic.APIUserAbortError) break;
+              if (error instanceof Anthropic.BadRequestError && !assistantContent && attempt < attempts.length - 1) {
+                continue;
+              }
+              if (isReasoning) {
+                await emit(THINKING_END);
+                isReasoning = false;
+              }
+              await emit(`${assistantContent ? "\n\n" : ""}Error: ${claudeErrorMessage(error, providerModelId)}`);
+              break;
+            }
+          }
+
+          if (!assistantContent.trim() && !request.signal.aborted) {
+            await emit("Error: Claude returned an empty response.");
+          }
+          await persistAssistantMessage(chatId, body.title, userMessage, assistantMessage, assistantContent);
+          try {
+            controller.close();
+          } catch {
+            // Already closed by a disconnect.
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Cache-Control": "no-cache",
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+      });
+    }
 
     if (provider === "nvidia") {
       const isProModel = !customModel && store.settings.model === PRO_MODEL;

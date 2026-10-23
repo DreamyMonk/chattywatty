@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Chatmio",
-  description: "A private DeepSeek chat UI.",
+  description: "A private AI chat for DeepSeek, NVIDIA NIM and Claude.",
 };
 
 export default function RootLayout({

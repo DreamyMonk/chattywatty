@@ -3,6 +3,7 @@ import { doc, getDoc, getFirestore, setDoc } from "firebase/firestore";
 import {
   defaultModelForProvider,
   isModelAvailableForProvider,
+  isProviderId,
   sanitizeCustomModel,
   sanitizeEndpoint,
   type ModelId,
@@ -30,19 +31,29 @@ export type SettingsState = {
   provider: ProviderId;
   officialApiKey: string;
   nvidiaApiKey: string;
+  anthropicApiKey: string;
   officialBaseUrl: string;
   nvidiaBaseUrl: string;
+  anthropicBaseUrl: string;
   officialCustomModel: string;
   nvidiaCustomModel: string;
+  anthropicCustomModel: string;
   model: ModelId;
   instructions: string;
 };
 
-export type PublicSettingsState = Omit<SettingsState, "officialApiKey" | "nvidiaApiKey"> & {
+export type PublicSettingsState = Omit<SettingsState, "officialApiKey" | "nvidiaApiKey" | "anthropicApiKey"> & {
   apiKeySet: boolean;
   officialApiKeySet: boolean;
   nvidiaApiKeySet: boolean;
+  anthropicApiKeySet: boolean;
 };
+
+export function apiKeyForProvider(settings: SettingsState, provider: ProviderId = settings.provider) {
+  if (provider === "nvidia") return settings.nvidiaApiKey;
+  if (provider === "anthropic") return settings.anthropicApiKey;
+  return settings.officialApiKey;
+}
 
 export type StoreState = {
   settings: SettingsState;
@@ -63,10 +74,13 @@ const defaultSettings: SettingsState = {
   provider: "official",
   officialApiKey: "",
   nvidiaApiKey: "",
+  anthropicApiKey: "",
   officialBaseUrl: "",
   nvidiaBaseUrl: "",
+  anthropicBaseUrl: "",
   officialCustomModel: "",
   nvidiaCustomModel: "",
+  anthropicCustomModel: "",
   model: "deepseek-v4-flash",
   instructions: "You are Chatmio, my private assistant. Be clear, useful, and direct.",
 };
@@ -116,10 +130,7 @@ function defaultStore(): StoreState {
 
 function normalizeStore(value: Partial<StoreState> | null): StoreState {
   const incomingSettings = value?.settings as Partial<SettingsState> & { apiKey?: string } | undefined;
-  const provider =
-    incomingSettings?.provider === "nvidia" || incomingSettings?.provider === "official"
-      ? incomingSettings.provider
-      : "official";
+  const provider = isProviderId(incomingSettings?.provider) ? incomingSettings.provider : "official";
   const model = isModelAvailableForProvider(incomingSettings?.model, provider)
     ? incomingSettings!.model!
     : defaultModelForProvider(provider);
@@ -132,10 +143,13 @@ function normalizeStore(value: Partial<StoreState> | null): StoreState {
       model,
       officialApiKey: incomingSettings?.officialApiKey ?? incomingSettings?.apiKey ?? "",
       nvidiaApiKey: incomingSettings?.nvidiaApiKey ?? "",
+      anthropicApiKey: incomingSettings?.anthropicApiKey ?? "",
       officialBaseUrl: sanitizeEndpoint(incomingSettings?.officialBaseUrl),
       nvidiaBaseUrl: sanitizeEndpoint(incomingSettings?.nvidiaBaseUrl),
+      anthropicBaseUrl: sanitizeEndpoint(incomingSettings?.anthropicBaseUrl),
       officialCustomModel: sanitizeCustomModel(incomingSettings?.officialCustomModel),
       nvidiaCustomModel: sanitizeCustomModel(incomingSettings?.nvidiaCustomModel),
+      anthropicCustomModel: sanitizeCustomModel(incomingSettings?.anthropicCustomModel),
     },
     chats: value?.chats?.length ? value.chats.map(normalizeChat) : [createChat()],
   };
@@ -160,6 +174,7 @@ export async function writeStore(store: StoreState) {
 export function toPublicSettings(settings: SettingsState): PublicSettingsState {
   const officialApiKeySet = Boolean(settings.officialApiKey.trim());
   const nvidiaApiKeySet = Boolean(settings.nvidiaApiKey.trim());
+  const anthropicApiKeySet = Boolean(settings.anthropicApiKey.trim());
 
   return {
     provider: settings.provider,
@@ -167,10 +182,13 @@ export function toPublicSettings(settings: SettingsState): PublicSettingsState {
     instructions: settings.instructions,
     officialBaseUrl: settings.officialBaseUrl,
     nvidiaBaseUrl: settings.nvidiaBaseUrl,
+    anthropicBaseUrl: settings.anthropicBaseUrl,
     officialCustomModel: settings.officialCustomModel,
     nvidiaCustomModel: settings.nvidiaCustomModel,
-    apiKeySet: settings.provider === "nvidia" ? nvidiaApiKeySet : officialApiKeySet,
+    anthropicCustomModel: settings.anthropicCustomModel,
+    apiKeySet: Boolean(apiKeyForProvider(settings).trim()),
     officialApiKeySet,
     nvidiaApiKeySet,
+    anthropicApiKeySet,
   };
 }
